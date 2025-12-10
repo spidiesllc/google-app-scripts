@@ -1,0 +1,123 @@
+/****************************************************************
+ ETH_CONFIGURATION
+****************************************************************/
+const ETH_CONFIG = {
+  sheetName: "Sheet1",          // Sheet containing the wallet list
+  startRow: 422,                  // Row where wallets begin (excluding header)
+  runCount: 425,                 // Number of wallets to process
+  API_KEY: "5P7367VUCKRTPUHEHMUCPJHR6EJEWE6C5N",
+
+  walletHeader: "Wallet Address",  // Column header for wallet addresses
+  ethHeader: "ETH Quantity",       // Output column for ETH balance
+
+  REQUEST_DELAY: 400,          // 0.4 sec between calls (safe for 3/sec limit)
+  RETRY_DELAY: 1200,           // Backoff delay when rate-limited
+  MAX_RETRIES: 5               // Retry attempts
+};
+/****************************************************************/
+
+
+/**
+ * Main function — fetch ETH balances
+ */
+function getEthBalances() {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(ETH_CONFIG.sheetName);
+  if (!sheet) throw new Error(`Sheet '${ETH_CONFIG.sheetName}' not found.`);
+
+  // Read header row
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const lower = headers.map(h => h.toString().trim().toLowerCase());
+
+  const walletCol = lower.indexOf(ETH_CONFIG.walletHeader.toLowerCase()) + 1;
+  const ethCol    = lower.indexOf(ETH_CONFIG.ethHeader.toLowerCase()) + 1;
+
+  if (walletCol < 1) throw new Error(`Wallet column '${ETH_CONFIG.walletHeader}' not found.`);
+  if (ethCol < 1) throw new Error(`ETH column '${ETH_CONFIG.ethHeader}' not found.`);
+
+  // Read wallet list
+  const wallets = sheet.getRange(ETH_CONFIG.startRow, walletCol, ETH_CONFIG.runCount, 1).getValues();
+
+  const results = [];
+
+  for (let i = 0; i < wallets.length; i++) {
+    const wallet = wallets[i][0];
+
+    if (!wallet) {
+      results.push([""]);
+      continue;
+    }
+
+    const ethAmount = fetchEthBalanceWithRateLimit(wallet);
+    results.push([ethAmount]);
+  }
+
+  sheet.getRange(ETH_CONFIG.startRow, ethCol, results.length, 1).setValues(results);
+  Logger.log("ETH fetching completed.");
+}
+
+
+/****************************************************************
+ RATE-LIMIT SAFE WRAPPERS
+****************************************************************/
+
+/**
+ * Automatically retries when rate-limited.
+ */
+function fetchEthBalanceWithRateLimit(wallet) {
+  let attempts = 0;
+
+  while (attempts <= ETH_CONFIG.MAX_RETRIES) {
+    const res = fetchEthBalance(wallet);
+
+    if (res === "__RATE_LIMIT__") {
+      Logger.log("Rate limit hit — retrying...");
+      Utilities.sleep(ETH_CONFIG.RETRY_DELAY);
+      attempts++;
+      continue;
+    }
+
+    return res; // valid result
+  }
+
+  Logger.log("Failed after max retries — returning 0.");
+  return 0;
+}
+
+
+/****************************************************************
+ ETHERSCAN V2 API CALLS
+****************************************************************/
+
+/**
+ * Calls the Etherscan V2 endpoint to fetch the balance.
+ */
+function fetchEthBalance(wallet) {
+  try {
+    const url =
+      `https://api.etherscan.io/v2/api?chainid=1&module=account&action=balance` +
+      `&address=${wallet}&tag=latest&apikey=${ETH_CONFIG.API_KEY}`;
+
+    const response = UrlFetchApp.fetch(url);
+    Utilities.sleep(ETH_CONFIG.REQUEST_DELAY);
+
+    const body = response.getContentText();
+    Logger.log("API response: " + body);
+
+    const json = JSON.parse(body);
+
+    if (json.message &&
+        json.message.toLowerCase().includes("rate limit")) {
+      return "__RATE_LIMIT__";
+    }
+
+    if (json.status !== "1") return 0;
+
+    // Etherscan returns wei — convert to ETH
+    return Number(json.result) / 1e18;
+
+  } catch (err) {
+    Logger.log("Error: " + err);
+    return 0;
+  }
+}
