@@ -1,0 +1,147 @@
+/*********************************************************
+ CONFIGURATION
+*********************************************************/
+const CONFIG = {
+  sheetName: "Sheet1",
+  startRow: 205,
+  runCount: 245,
+  API_KEY: "5P7367VUCKRTPUHEHMUCPJHR6EJEWE6C5N", // Etherscan API
+
+  tokenContract: "0x0000000000000000000000000000000000000000", // ETH default
+
+  walletHeader: "Wallet Address",
+  usdHeader: "USD Value",
+
+  REQUEST_DELAY: 400,      // 400ms delay between API calls (safe for 3/sec limit)
+  RETRY_DELAY: 1200,       // Backoff delay when rate-limited
+  MAX_RETRIES: 5           // Retry attempts on rate limit
+};
+/*********************************************************/
+
+
+function getTokenValuesForWallets() {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(CONFIG.sheetName);
+  if (!sheet) throw new Error(`Sheet '${CONFIG.sheetName}' not found.`);
+
+  const headerRow = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const lower = headerRow.map(h => h.toString().trim().toLowerCase());
+
+  const walletCol = lower.indexOf(CONFIG.walletHeader.toLowerCase()) + 1;
+  const usdCol    = lower.indexOf(CONFIG.usdHeader.toLowerCase()) + 1;
+
+  if (walletCol < 1) throw new Error(`Wallet column '${CONFIG.walletHeader}' missing.`);
+  if (usdCol < 1) throw new Error(`USD column '${CONFIG.usdHeader}' missing.`);
+
+  const priceUSD = fetchTokenUSDPrice(CONFIG.tokenContract);
+  if (priceUSD == null) throw new Error("Unable to fetch token USD price.");
+
+  const wallets = sheet.getRange(CONFIG.startRow, walletCol, CONFIG.runCount, 1).getValues();
+  const output = [];
+
+  for (let i = 0; i < wallets.length; i++) {
+    const wallet = wallets[i][0];
+
+    if (!wallet) {
+      output.push([""]);
+      continue;
+    }
+
+    const balance = fetchBalanceWithRateLimit(wallet, CONFIG.tokenContract);
+
+    const usdVal = balance * priceUSD;
+    output.push([usdVal]);
+  }
+
+  sheet.getRange(CONFIG.startRow, usdCol, output.length, 1).setValues(output);
+  Logger.log("Completed!");
+}
+
+
+/****************** RATE-LIMIT SAFE HELPERS ******************/
+
+function fetchBalanceWithRateLimit(wallet, contract) {
+  let retries = 0;
+
+  while (retries <= CONFIG.MAX_RETRIES) {
+    const result = fetchBalance(wallet, contract);
+
+    // Rate limit detected
+    if (result === "__RATE_LIMIT__") {
+      Logger.log("Rate limit hit — backing off...");
+      Utilities.sleep(CONFIG.RETRY_DELAY);
+      retries++;
+      continue;
+    }
+
+    // Valid result
+    return result;
+  }
+
+  Logger.log("Failed after retries — returning 0.");
+  return 0;
+}
+
+
+/****************** API CALLS ******************/
+
+function fetchBalance(wallet, contract) {
+  try {
+    let url;
+
+    if (contract === "0x0000000000000000000000000000000000000000") {
+      url = `https://api.etherscan.io/v2/api?chainid=1&module=account&action=balance` +
+            `&address=${wallet}&tag=latest&apikey=${CONFIG.API_KEY}`;
+    } else {
+      url = `https://api.etherscan.io/v2/api?chainid=1&module=account&action=tokenbalance` +
+            `&contractaddress=${contract}&address=${wallet}&tag=latest&apikey=${CONFIG.API_KEY}`;
+    }
+
+    const response = UrlFetchApp.fetch(url);
+    Utilities.sleep(CONFIG.REQUEST_DELAY); // throttle
+
+    const text = response.getContentText();
+    Logger.log("API response: " + text);
+
+    const json = JSON.parse(text);
+
+    if (json.message &&
+        json.message.toLowerCase().includes("rate limit")) {
+      return "__RATE_LIMIT__";
+    }
+
+    if (json.status !== "1") {
+      return 0;
+    }
+
+    return Number(json.result) / 1e18;
+
+  } catch (e) {
+    Logger.log("Error: " + e);
+    return 0;
+  }
+}
+
+
+function fetchTokenUSDPrice(contract) {
+  try {
+    // ETH price
+    if (contract === "0x0000000000000000000000000000000000000000") {
+      const url = `https://api.etherscan.io/v2/api?chainid=1&module=stats&action=ethprice&apikey=${CONFIG.API_KEY}`;
+      const r = UrlFetchApp.fetch(url).getContentText();
+      const j = JSON.parse(r);
+      return parseFloat(j.result.ethusd);
+    }
+
+    // ERC20 token price via Coingecko
+    const cgUrl = `https://api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses=${contract}&vs_currencies=usd`;
+    const resp = UrlFetchApp.fetch(cgUrl).getContentText();
+    const data = JSON.parse(resp);
+    const key = Object.keys(data)[0];
+    return data[key].usd;
+
+  } catch (e) {
+    Logger.log("Error fetching price: " + e);
+    return null;
+  }
+}
