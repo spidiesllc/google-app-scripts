@@ -1,0 +1,86 @@
+function getNFTCountsAlchemy() {
+
+  // ============================
+  // ⚙️ USER CONFIGURABLE VARIABLES
+  // ============================
+  const SHEET_NAME = "Sheet1";                     
+  const WALLET_COLUMN_HEADER = "Wallet Address";    // case-insensitive
+  const OUTPUT_COLUMN_HEADER = "NFT Count";         // case-insensitive
+  const START_ROW = 405;                              // first wallet row
+  const MAX_RUN_COUNT = 442;                         // max wallets to process
+  const API_KEY = "vwiYXTHUX_vAE5K0MquKPwaSaH09PW4M";           // <-- replace this
+  // ============================
+
+
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
+  if (!sheet) throw new Error("Sheet not found: " + SHEET_NAME);
+
+  // --- Get header row ---
+  const headerRow = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+  // --- Find wallet column index ---
+  const walletColIndex =
+    headerRow.map(h => h.toString().trim().toLowerCase())
+    .indexOf(WALLET_COLUMN_HEADER.toLowerCase()) + 1;
+
+  if (walletColIndex === 0)
+    throw new Error("Wallet Address column not found: " + WALLET_COLUMN_HEADER);
+
+  // --- Find output column index ---
+  const outputColIndex =
+    headerRow.map(h => h.toString().trim().toLowerCase())
+    .indexOf(OUTPUT_COLUMN_HEADER.toLowerCase()) + 1;
+
+  if (outputColIndex === 0)
+    throw new Error("Output column not found: " + OUTPUT_COLUMN_HEADER);
+
+
+  // --- Determine total rows and fetch wallet data ---
+  const lastRow = sheet.getLastRow();
+  const totalRowsAvailable = lastRow - START_ROW + 1;
+  const rowsToRun = Math.min(MAX_RUN_COUNT, totalRowsAvailable);
+
+  // Pull wallet addresses for limited run count
+  const walletRange = sheet.getRange(
+    START_ROW,
+    walletColIndex,
+    rowsToRun
+  );
+
+  const wallets = walletRange.getValues()
+    .flat()
+    .map(a => a.toString().trim())
+    .filter(a => a !== "");
+
+  const results = [];
+
+
+  // === PROCESS EACH WALLET ===
+  wallets.forEach(address => {
+    try {
+      const url =
+        `https://eth-mainnet.g.alchemy.com/nft/v3/${API_KEY}/getNFTsForOwner` +
+        `?owner=${address}&withMetadata=false`;
+
+      const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      const data = JSON.parse(response.getContentText());
+
+      const nftCount = data.totalCount ?? 0;
+
+      results.push([nftCount]);
+
+    } catch (err) {
+      Logger.log("Error for " + address + ": " + err);
+      results.push(["ERROR"]);
+    }
+  });
+
+
+  // === WRITE RESULTS TO SHEET ===
+  sheet.getRange(
+    START_ROW,
+    outputColIndex,
+    results.length,
+    1
+  ).setValues(results);
+}
