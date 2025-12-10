@@ -1,59 +1,88 @@
-const SHEET_NAME = '8k Real'; // <-- changeable
-const SHEET_ID = '1yEfPuPGhCM5QvR4RQ7w-TuiDfpvAvMQkJX5DYkZ1Lr8'; // <-- changeable
-const BITLY_TOKEN = 'dada6b9359f515d776f8413fdcaec1d4a69153dc';  // <-- changeable
-const START_ROW = 3; // <-- NEW: start row (1-based, row 3 means it skips headers) // <-- changeable
+/***************************************************************
+* Google Apps Script to fetch Bitly link click data and update
+* Google Sheet by matching header names (not column numbers)
+***************************************************************/
 
-function updateBitlyClicks() {
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
-  const data = sheet.getDataRange().getValues();
+function fetchBitlyClicks() {
+  // ====== USER CONFIGURATION ======
+  const SHEET_NAME = "Sheet1"; // name of your sheet
+  const STARTING_ROW = 3; // first data row (below headers)
+  const ENDING_ROW = 30; // set a number to limit rows, or keep null for all rows
+  const BITLY_LINKS_HEADER = "Bitly Links"; // header name for Bitly links
+  const BITLY_CLICKS_HEADER = "Clicks"; // header name for click count
+  const BITLY_ACCESS_TOKEN = "dada6b9359f515d776f8413fdcaec1d4a69153dc"; // Bitly API token
+  // =================================
 
-  const headers = data[0].map(h => h.toString().toLowerCase());
-  const bitlyIndex = headers.indexOf('bitly link');
-  const clicksIndex = headers.indexOf('clicks');
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  const headerRow = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
-  if (bitlyIndex === -1 || clicksIndex === -1) {
-    throw new Error("Bitly Link or Clicks column not found (check headers).");
+  // Identify column indexes dynamically by header name
+  const linkColIndex = headerRow.indexOf(BITLY_LINKS_HEADER) + 1;
+  const clicksColIndex = headerRow.indexOf(BITLY_CLICKS_HEADER) + 1;
+
+  if (linkColIndex === 0 || clicksColIndex === 0) {
+    throw new Error("One or both headers not found. Please check your header names.");
   }
 
-  for (let i = START_ROW - 1; i < data.length; i++) {
-    const url = data[i][bitlyIndex];
-    if (url && typeof url === 'string' && url.startsWith('http')) {
-      const linkId = extractBitlyId(url);
-      if (linkId) {
-        const clicks = getClickCount(linkId);
-        sheet.getRange(i + 1, clicksIndex + 1).setValue(clicks);
-        Utilities.sleep(500); // Rate limiting
+  const lastRow = ENDING_ROW || sheet.getLastRow();
+  const linkRange = sheet.getRange(STARTING_ROW, linkColIndex, lastRow - STARTING_ROW + 1, 1);
+  const linkValues = linkRange.getValues();
+
+  const clickResults = [];
+
+  for (let i = 0; i < linkValues.length; i++) {
+    const link = linkValues[i][0];
+    if (!link) {
+      clickResults.push([""]); // skip empty cells
+      continue;
+    }
+
+    try {
+      const shortLink = link.replace(/^https?:\/\//, ""); // remove https:// for API format
+      const response = UrlFetchApp.fetch(`https://api-ssl.bitly.com/v4/bitlinks/${shortLink}/clicks/summary`, {
+        headers: { Authorization: `Bearer ${BITLY_ACCESS_TOKEN}` },
+        muteHttpExceptions: true
+      });
+      const data = JSON.parse(response.getContentText());
+
+      if (response.getResponseCode() === 200 && data.total_clicks !== undefined) {
+        clickResults.push([data.total_clicks]);
+      } else {
+        clickResults.push(["Error"]);
       }
+    } catch (e) {
+      clickResults.push(["Error"]);
+      Logger.log(`Error fetching link: ${link} -> ${e}`);
     }
   }
+
+  // Write results to sheet
+  const clickRange = sheet.getRange(STARTING_ROW, clicksColIndex, clickResults.length, 1);
+  clickRange.setValues(clickResults);
+
+  Logger.log("✅ Bitly clicks fetched and updated successfully!");
 }
 
-// Helper to extract bitlink ID
-function extractBitlyId(url) {
-  return url.replace(/^https?:\/\/bit\.ly\//, '');
+
+/***************************************************************
+*  MENU BUTTON → Appears as a top-bar menu like: Bitly Tools
+***************************************************************/
+
+/**
+ * Creates custom menu in Google Sheets UI
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+
+  ui.createMenu("Bitly Tools")
+    .addItem("Fetch Bitly Clicks", "runFetchBitlyClicks")
+    .addToUi();
 }
 
-// Fetch click count from Bitly
-function getClickCount(bitlinkId) {
-  const endpoint = `https://api-ssl.bitly.com/v4/bitlinks/bit.ly/${bitlinkId}/clicks/summary`;
-
-  const options = {
-    method: 'get',
-    contentType: 'application/json',
-    headers: {
-      Authorization: `Bearer ${BITLY_TOKEN}`
-    },
-    muteHttpExceptions: true
-  };
-
-  const response = UrlFetchApp.fetch(endpoint, options);
-  const code = response.getResponseCode();
-
-  if (code === 200) {
-    const json = JSON.parse(response.getContentText());
-    return json.total_clicks || 0;
-  } else {
-    console.warn(`Error ${code} for ${bitlinkId}`);
-    return 0;
-  }
+/**
+ * Wrapper for the menu button (required)
+ */
+function runFetchBitlyClicks() {
+  fetchBitlyClicks();
+  SpreadsheetApp.getActive().toast("Bitly clicks updated!", "Done", 5);
 }
